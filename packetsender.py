@@ -1,12 +1,13 @@
 import socket
 import argparse
 import struct
+import select  # Import the select module
 
 
 def send_packet(
     dest_ip="127.0.0.1", dest_port=80, protocol="tcp", payload=b"", eth_header=None
 ):
-    """Sends a raw packet with the specified parameters.
+    """Sends a raw packet with the specified parameters and receives a response.
 
     Args:
         dest_ip (str): Destination IP address (e.g., "192.168.1.10"). Defaults to "127.0.0.1".
@@ -74,6 +75,16 @@ def send_packet(
 
     # Send the packet
     s.sendto(packet, (dest_ip, dest_port))
+
+    # Wait for a response (optional timeout)
+    s.setblocking(False)  # Set the socket to non-blocking mode
+    timeout = 12  # Set a timeout of 2 seconds
+    ready = select.select([s], [], [], timeout)
+    if ready[0]:
+        data, addr = s.recvfrom(65535)  # Receive up to 65535 bytes
+        print(f"Response from {addr}: {data.hex()}")
+    else:
+        print("No response received within the timeout.")
 
 
 def calculate_checksum(header):
