@@ -1,16 +1,14 @@
-import socket
 import argparse
+import select
+import socket
 import struct
-import select  # Import the select module
 
 
-def send_packet(
-    dest_ip="127.0.0.1", dest_port=80, protocol="tcp", payload=b"", eth_header=None
-):
+def send_packet(dest_ip, dest_port=80, protocol="tcp", payload=b"", eth_header=None):
     """Sends a raw packet with the specified parameters and receives a response.
 
     Args:
-        dest_ip (str): Destination IP address (e.g., "192.168.1.10"). Defaults to "127.0.0.1".
+        dest_ip (str): Destination IP address (e.g., "192.168.1.10").
         dest_port (int): Destination port number. Defaults to 80.
         protocol (str): Protocol (e.g., "tcp", "udp", "icmp"). Defaults to "tcp".
         payload (bytes): Raw packet payload. Defaults to b"".
@@ -19,13 +17,18 @@ def send_packet(
 
     Raises:
         ValueError: If an invalid protocol is provided.
+        PermissionError: If run without root privileges.
+        socket.error: For socket-related errors.
     """
 
     try:
         s = socket.socket(socket.AF_INET, socket.SOCK_RAW, socket.IPPROTO_RAW)
     except PermissionError:
-        print("Error: You need root privileges to send raw packets.")
-        exit(1)
+        # trunk-ignore(ruff/B904)
+        raise PermissionError("Error: You need root privileges to send raw packets.")
+
+    # Get source IP automatically
+    source_ip = socket.gethostbyname(socket.gethostname())
 
     # Construct IP header
     ip_header = struct.pack(
@@ -40,12 +43,14 @@ def send_packet(
             socket.IPPROTO_TCP
             if protocol.lower() == "tcp"
             else (
-                socket.IPPROTO_UDP if protocol.lower() == "udp" else socket.IPPROTO_ICMP
+                socket.IPPROTO_UDP
+                if protocol.lower() == "udp"
+                else (socket.IPPROTO_ICMP if protocol.lower() == "icmp" else None)
             )
         ),  # Protocol
         0,  # Header checksum (calculated later)
         socket.inet_aton(dest_ip),  # Destination IP
-        socket.inet_aton("192.168.1.5"),  # Source IP (replace with your IP)
+        socket.inet_aton(source_ip),  # Source IP
     )
 
     # Calculate IP header checksum
@@ -67,24 +72,30 @@ def send_packet(
         ),  # Protocol
         checksum,  # Header checksum
         socket.inet_aton(dest_ip),  # Destination IP
-        socket.inet_aton("192.168.1.5"),  # Source IP (replace with your IP)
+        socket.inet_aton(source_ip),  # Source IP
     )
 
     # Combine headers and payload
     packet = ip_header + payload
 
-    # Send the packet
-    s.sendto(packet, (dest_ip, dest_port))
+    try:
+        # Send the packet
+        s.sendto(packet, (dest_ip, dest_port))
 
-    # Wait for a response (optional timeout)
-    s.setblocking(False)  # Set the socket to non-blocking mode
-    timeout = 12  # Set a timeout of 2 seconds
-    ready = select.select([s], [], [], timeout)
-    if ready[0]:
-        data, addr = s.recvfrom(65535)  # Receive up to 65535 bytes
-        print(f"Response from {addr}: {data.hex()}")
-    else:
-        print("No response received within the timeout.")
+        # Wait for a response (optional timeout)
+        s.setblocking(False)
+        timeout = 2
+        ready = select.select([s], [], [], timeout)
+        if ready[0]:
+            data, addr = s.recvfrom(65535)
+            print(f"Response from {addr}: {data.hex()}")
+        else:
+            print("No response received within the timeout.")
+
+    except socket.error as e:
+        raise socket.error(f"Error sending packet: {e}")
+    finally:
+        s.close()
 
 
 def calculate_checksum(header):
@@ -131,5 +142,10 @@ if __name__ == "__main__":
     else:
         payload = args.text.encode()
 
-    send_packet(args.dest_ip, args.dest_port, args.protocol, payload)
-    print(f"Packet sent to {args.dest_ip}:{args.dest_port} (Protocol: {args.protocol})")
+    try:
+        send_packet(args.dest_ip, args.dest_port, args.protocol, payload)
+        print(
+            f"Packet sent to {args.dest_ip}:{args.dest_port} (Protocol: {args.protocol})"
+        )
+    except (ValueError, PermissionError, socket.error) as e:
+        print(e)
