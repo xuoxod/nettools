@@ -7,7 +7,8 @@ import subprocess
 from datetime import datetime
 from ipaddress import ip_network, ip_address
 import threading
-from concurrent.futures import ThreadPoolExecutor, as_completed
+import asyncio
+from typing import List, Tuple
 
 # Import Scapy for efficient MAC address retrieval
 from scapy.all import ARP, Ether, srp
@@ -19,9 +20,9 @@ from jinja2 import Environment, FileSystemLoader
 print_lock = threading.Lock()
 
 
-def scan_single_port(ip_address, port):
+async def scan_single_port(ip_address: str, port: int) -> Tuple[int, str] or None:
     """
-    Scans a single port on a single IP address and handles potential errors.
+    Asynchronously scans a single port on a single IP address and handles potential errors.
 
     Args:
         ip_address (str): The IP address to scan.
@@ -32,20 +33,22 @@ def scan_single_port(ip_address, port):
                        otherwise None.
     """
     try:
-        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
-            sock.settimeout(0.5)  # Set a timeout for faster scanning
-            result = sock.connect_ex((ip_address, port))
-            if result == 0:
-                try:
-                    service = socket.getservbyport(
-                        port
-                    )  # Get service name if available
-                except OSError:
-                    service = "Unknown"
-                return port, service
-    except (socket.gaierror, socket.timeout, ConnectionRefusedError) as e:
-        with print_lock:
-            print(f"Error scanning {ip_address}:{port}: {e}")
+        # Use asyncio.open_connection() for asynchronous socket operations
+        reader, writer = await asyncio.open_connection(ip_address, port)
+        writer.close()
+        await writer.wait_closed()
+        try:
+            service = socket.getservbyport(port)  # Get service name if available
+        except OSError:
+            service = "Unknown"
+        return port, service
+    except (
+        asyncio.TimeoutError,
+        ConnectionRefusedError,
+        OSError,
+    ) as e:
+        # Handle connection errors silently for cleaner output
+        pass
     except KeyboardInterrupt:
         with print_lock:
             print("\nScan interrupted by user.")
@@ -53,9 +56,11 @@ def scan_single_port(ip_address, port):
     return None
 
 
-def scan_ip(ip_address, ports, skip_ports=None):
+async def scan_ip(
+    ip_address: str, ports: List[int], skip_ports: List = None
+) -> Tuple[str, List]:
     """
-    Scans a single IP for a list of ports, optionally skipping
+    Asynchronously scans a single IP for a list of ports, optionally skipping
     specified ports or port ranges.
 
     Args:
@@ -68,24 +73,32 @@ def scan_ip(ip_address, ports, skip_ports=None):
         tuple: A tuple containing the IP address and a list of open ports with their services.
     """
     open_ports = []
+    scan_tasks = []
     for port in ports:
         if skip_ports:
+            should_skip = False
             for skip_item in skip_ports:
                 if isinstance(skip_item, str) and "-" in skip_item:
-                    # Handle port range skipping
                     skip_start, skip_end = map(int, skip_item.split("-"))
                     if skip_start <= port <= skip_end:
-                        continue  # Skip this port
+                        should_skip = True
+                        break
                 elif port == skip_item:
-                    # Handle single port skipping
-                    continue  # Skip this port
-        result = scan_single_port(ip_address, port)
+                    should_skip = True
+                    break
+            if should_skip:
+                continue
+        scan_tasks.append(scan_single_port(ip_address, port))
+
+    # Gather results concurrently using asyncio.gather()
+    results = await asyncio.gather(*scan_tasks)
+    for result in results:
         if result:
             open_ports.append(result)
     return str(ip_address), open_ports
 
 
-def get_mac_address(ip_address):
+def get_mac_address(ip_address: str) -> str:
     """
     Retrieves the MAC address associated with an IP address using Scapy.
 
@@ -107,16 +120,15 @@ def get_mac_address(ip_address):
         return "Unknown"
 
 
-def network_scan(
-    targets,
-    ports,
-    skip_octets=None,
-    skip_octet_ranges=None,
-    skip_ports=None,
-    max_threads=50,
-):
+async def perform_scan(
+    targets: List[str],
+    ports: List[int],
+    skip_octets: List = None,
+    skip_octet_ranges: List = None,
+    skip_ports: List = None,
+) -> dict:
     """
-    Scans a network for open ports within a specified range using multithreading.
+    Asynchronously performs the network scan for the given targets and ports.
 
     Args:
         targets (list): A list of IP addresses and/or CIDR ranges to scan.
@@ -124,13 +136,11 @@ def network_scan(
         skip_octets (list, optional): A list of last octets to skip.
         skip_octet_ranges (list, optional): A list of tuples representing octet ranges to skip.
         skip_ports (list, optional): A list of port numbers to skip.
-        max_threads (int, optional): The maximum number of threads to use for scanning.
 
     Returns:
         dict: A dictionary where keys are IP addresses and values are dictionaries
               containing open ports with services and MAC addresses.
     """
-
     open_ports = {}
     all_ips = []
 
@@ -169,25 +179,23 @@ def network_scan(
                 with print_lock:
                     print(f"Invalid IP address: {target}")
 
-    # Use threading to scan IP addresses concurrently
-    with ThreadPoolExecutor(max_workers=max_threads) as executor:
-        futures = [executor.submit(scan_ip, ip, ports, skip_ports) for ip in all_ips]
+    scan_tasks = [scan_ip(ip, ports, skip_ports) for ip in all_ips]
+    results = await asyncio.gather(*scan_tasks)
 
-        for future in as_completed(futures):
-            ip, ports = future.result()
-            if ports:
-                mac = get_mac_address(ip)  # Get MAC address for the current IP
-                open_ports[ip] = {"ports": ports, "mac": mac}
-                with print_lock:
-                    print(f"IP: {ip}, MAC: {mac}")  # Print IP and MAC to console
-                    for port, service in ports:
-                        print(f"  Port: {port}, Service: {service}")
-                    print("")  # Add a blank line between nodes
+    for ip, ports in results:
+        if ports:
+            mac = get_mac_address(ip)
+            open_ports[ip] = {"ports": ports, "mac": mac}
+            with print_lock:
+                print(f"IP: {ip}, MAC: {mac}")
+                for port, service in ports:
+                    print(f"  Port: {port}, Service: {service}")
+                print("")
 
     return open_ports
 
 
-def save_results(results, output_format, output_file=None):
+def save_results(results: dict, output_format: str, output_file: str = None) -> None:
     """
     Saves the scan results to a file or prints them to the console in a format
     that is both human-readable and easily parsable by other programs.
@@ -255,7 +263,6 @@ def save_results(results, output_format, output_file=None):
 
     elif output_format.lower() == "html":
         # Load Jinja2 template for HTML output
-        # trunk-ignore(bandit/B701)
         env = Environment(loader=FileSystemLoader("."))
         template = env.get_template("scan_results.html")
         content = template.render(scan_results=results, scan_time=datetime.now())
@@ -278,7 +285,7 @@ def save_results(results, output_format, output_file=None):
             print(content)
 
 
-def parse_octet_ranges(range_string):
+def parse_octet_ranges(range_string: str) -> List[Tuple[int, int]]:
     """
     Parses a string of octet ranges into a list of tuples.
 
@@ -300,7 +307,7 @@ def parse_octet_ranges(range_string):
     return octet_ranges
 
 
-def parse_ports(ports_string):
+def parse_ports(ports_string: str) -> List[int]:
     """
     Parses a string of comma-separated port numbers and port ranges
     into a list of integers.
@@ -323,7 +330,7 @@ def parse_ports(ports_string):
     return ports
 
 
-def parse_skip_ports(skip_ports_string):
+def parse_skip_ports(skip_ports_string: str) -> List[int or str]:
     """
     Parses a string of comma-separated port numbers and port ranges
     into a list.
@@ -346,7 +353,7 @@ def parse_skip_ports(skip_ports_string):
     return skip_ports
 
 
-def run_metasploit(msf_command):
+def run_metasploit(msf_command: str) -> None:
     """Runs a Metasploit command using the `msfconsole` command-line interface."""
     try:
         # Construct the full command, including piping to stdout
@@ -376,7 +383,7 @@ def run_metasploit(msf_command):
         print(f"An error occurred while running the Metasploit command: {e}")
 
 
-def main():
+async def main():
     """Main function to perform the scan and handle results."""
     parser = argparse.ArgumentParser(
         description="NetworkRecon - Enhanced Network Port Scanner with Metasploit Integration",
@@ -445,7 +452,7 @@ def main():
     # Parse the skip_ports argument
     skip_ports = parse_skip_ports(args.skip_ports)
 
-    results = network_scan(
+    results = perform_scan(
         args.targets,
         ports,
         skip_octets=skip_octets,
