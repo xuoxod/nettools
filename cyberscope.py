@@ -5,19 +5,7 @@ import threading
 import json
 import csv
 from datetime import datetime
-from scapy.all import sniff, IP, TCP, UDP, ICMP, Raw
-
-# Define common filter expressions with descriptions
-COMMON_FILTERS = {
-    1: ("tcp port 80", "Capture HTTP traffic"),
-    2: ("tcp port 443", "Capture HTTPS traffic"),
-    3: ("udp port 53", "Capture DNS traffic"),
-    4: ("tcp port 22", "Capture SSH traffic"),
-    5: ("tcp port 21", "Capture FTP traffic"),
-    6: ("tcp port 25", "Capture SMTP traffic"),
-    7: ("tcp port 110", "Capture POP3 traffic"),
-    8: ("tcp port 143", "Capture IMAP traffic"),
-}
+from scapy.all import sniff, IP, TCP, UDP, ICMP, Raw, Packet
 
 # Global dictionary to store captured packets, grouped by IP
 captured_packets = {}
@@ -25,13 +13,22 @@ print_lock = threading.Lock()
 
 
 def format_packet_data(packet):
-    """Formats the packet data for display."""
+    """Formats the packet data for display, handling potential errors."""
     output = []
     output.append("-" * 40)  # Separator line
-    output.append(f"Timestamp: {datetime.fromtimestamp(packet.time)}")
-    output.append(f"Source IP: {packet[IP].src}")
-    output.append(f"Destination IP: {packet[IP].dst}")
-    output.append(f"Protocol: {packet.sprintf('%IP.proto%')}")
+
+    try:
+        output.append(f"Timestamp: {datetime.fromtimestamp(packet.time)}")
+    except Exception as e:
+        output.append(f"Error getting timestamp: {e}")
+
+    # Check if the IP layer is present before accessing its attributes
+    if IP in packet:
+        output.append(f"Source IP: {packet[IP].src}")
+        output.append(f"Destination IP: {packet[IP].dst}")
+        output.append(f"Protocol: {packet.sprintf('%IP.proto%')}")
+    else:
+        output.append("IP Layer not found in packet.")
 
     # Add port information if TCP or UDP
     if TCP in packet:
@@ -48,61 +45,107 @@ def format_packet_data(packet):
 
     # Add payload information if available
     if Raw in packet:
-        payload = packet[Raw].load.decode("utf-8", errors="replace")
-        output.append(f"Payload:\n{payload}")
+        try:
+            payload = packet[Raw].load.decode("utf-8", errors="replace")
+            output.append(f"Payload:\n{payload}")
+        except Exception as e:
+            output.append(f"Error decoding payload: {e}")
 
     return "\n".join(output)
 
 
 def packet_callback(packet):
-    """Callback function to process captured packets."""
+    """Callback function to process captured packets, handling potential errors."""
     with print_lock:
-        # Extract relevant information from the packet
-        src_ip = packet[IP].src if IP in packet else "Unknown"
-        dst_ip = packet[IP].dst if IP in packet else "Unknown"
-        protocol = packet.sprintf("%IP.proto%")
+        try:
+            # Extract relevant information from the packet
+            src_ip = packet[IP].src if IP in packet else "Unknown"
+            dst_ip = packet[IP].dst if IP in packet else "Unknown"
+            protocol = packet.sprintf("%IP.proto%")
 
-        # Group packets by source IP
-        if src_ip not in captured_packets:
-            captured_packets[src_ip] = []
-        captured_packets[src_ip].append(packet)
+            # Group packets by source IP
+            if src_ip not in captured_packets:
+                captured_packets[src_ip] = []
+            captured_packets[src_ip].append(packet)
 
-        # Print the formatted packet information to the console
-        print(format_packet_data(packet))
-        print("-" * 40)  # Separator line
+            # Print the formatted packet information to the console
+            print(format_packet_data(packet))
+            print("-" * 40)  # Separator line
+
+        except Exception as e:
+            print(f"Error processing packet: {e}")
 
 
-def capture_traffic(interface, filter_expression, count=0):
-    """Captures network traffic on the specified interface."""
-    sniff(
-        iface=interface,
-        filter=filter_expression,
-        prn=packet_callback,
-        count=count,
-        store=False,
-    )
+def capture_traffic(interface, count=0):
+    """Captures network traffic on the specified interface, handling potential errors."""
+    try:
+        sniff(
+            iface=interface,
+            prn=packet_callback,
+            count=count,
+            store=False,
+        )
+    except PermissionError:
+        print(
+            "Error: Insufficient permissions to capture on interface. Try running with sudo."
+        )
+    except Exception as e:
+        print(f"Error capturing traffic: {e}")
 
 
 def save_to_csv(filename):
-    """Saves the captured packets to a CSV file."""
-    with open(filename, "w", newline="") as csvfile:
-        fieldnames = [
-            "timestamp",
-            "src_ip",
-            "dst_ip",
-            "protocol",
-            "src_port",
-            "dst_port",
-            "icmp_type",
-            "icmp_code",
-            "payload",
-        ]
-        writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
-        writer.writeheader()
-        for src_ip, packets in captured_packets.items():
-            for packet in packets:
+    """Saves the captured packets to a CSV file, handling potential errors."""
+    try:
+        with open(filename, "w", newline="") as csvfile:
+            fieldnames = [
+                "timestamp",
+                "src_ip",
+                "dst_ip",
+                "protocol",
+                "src_port",
+                "dst_port",
+                "icmp_type",
+                "icmp_code",
+                "payload",
+            ]
+            writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
+            writer.writeheader()
+            for src_ip, packets in captured_packets.items():
+                for packet in packets:
+                    # Use a try-except block to handle potential errors when accessing packet layers
+                    try:
+                        data = {
+                            "timestamp": datetime.fromtimestamp(packet.time),
+                            "src_ip": packet[IP].src if IP in packet else "Unknown",
+                            "dst_ip": packet[IP].dst if IP in packet else "Unknown",
+                            "protocol": packet.sprintf("%IP.proto%"),
+                            "src_port": packet[TCP].sport if TCP in packet else "N/A",
+                            "dst_port": packet[TCP].dport if TCP in packet else "N/A",
+                            "icmp_type": packet[ICMP].type if ICMP in packet else "N/A",
+                            "icmp_code": packet[ICMP].code if ICMP in packet else "N/A",
+                            "payload": (
+                                packet[Raw].load.decode("utf-8", errors="replace")
+                                if Raw in packet
+                                else "N/A"
+                            ),
+                        }
+                        writer.writerow(data)
+                    except Exception as e:
+                        print(f"Error writing packet data to CSV: {e}")
+    except OSError as e:
+        print(f"Error saving to CSV file: {e}")
+
+
+def save_to_json(filename):
+    """Saves the captured packets to a JSON file, handling potential errors."""
+    output_data = {}
+    for src_ip, packets in captured_packets.items():
+        output_data[src_ip] = []
+        for packet in packets:
+            # Use a try-except block to handle potential errors when accessing packet layers
+            try:
                 data = {
-                    "timestamp": datetime.fromtimestamp(packet.time),
+                    "timestamp": datetime.fromtimestamp(packet.time).isoformat(),
                     "src_ip": packet[IP].src if IP in packet else "Unknown",
                     "dst_ip": packet[IP].dst if IP in packet else "Unknown",
                     "protocol": packet.sprintf("%IP.proto%"),
@@ -116,34 +159,15 @@ def save_to_csv(filename):
                         else "N/A"
                     ),
                 }
-                writer.writerow(data)
+                output_data[src_ip].append(data)
+            except Exception as e:
+                print(f"Error writing packet data to JSON: {e}")
 
-
-def save_to_json(filename):
-    """Saves the captured packets to a JSON file."""
-    output_data = {}
-    for src_ip, packets in captured_packets.items():
-        output_data[src_ip] = []
-        for packet in packets:
-            data = {
-                "timestamp": datetime.fromtimestamp(packet.time).isoformat(),
-                "src_ip": packet[IP].src if IP in packet else "Unknown",
-                "dst_ip": packet[IP].dst if IP in packet else "Unknown",
-                "protocol": packet.sprintf("%IP.proto%"),
-                "src_port": packet[TCP].sport if TCP in packet else "N/A",
-                "dst_port": packet[TCP].dport if TCP in packet else "N/A",
-                "icmp_type": packet[ICMP].type if ICMP in packet else "N/A",
-                "icmp_code": packet[ICMP].code if ICMP in packet else "N/A",
-                "payload": (
-                    packet[Raw].load.decode("utf-8", errors="replace")
-                    if Raw in packet
-                    else "N/A"
-                ),
-            }
-            output_data[src_ip].append(data)
-
-    with open(filename, "w") as jsonfile:
-        json.dump(output_data, jsonfile, indent=4)
+    try:
+        with open(filename, "w") as jsonfile:
+            json.dump(output_data, jsonfile, indent=4)
+    except OSError as e:
+        print(f"Error saving to JSON file: {e}")
 
 
 def main():
@@ -153,7 +177,16 @@ def main():
 
         This script allows you to capture and view network packets in detail. 
         You can specify the network interface, the number of packets to capture, 
-        and apply filters to focus on specific traffic.""",
+        and apply filters to focus on specific traffic.
+
+        Examples:
+        - Capture 100 packets on interface eth0:
+            python cyberscope.py -i eth0 -c 100
+        - Capture packets continuously on interface wlan0 and save to a CSV file:
+            python cyberscope.py -i wlan0 -o output.csv -t csv
+        - Capture packets continuously on the default interface and save to a JSON file:
+            python cyberscope.py -o output.json -t json
+        """,
         formatter_class=argparse.RawTextHelpFormatter,  # Preserve formatting
     )
 
@@ -184,16 +217,6 @@ def main():
         help="Number of packets to capture (0 for continuous capture). Defaults to 0.",
     )
     parser.add_argument(
-        "-f",
-        "--filter",
-        type=int,
-        choices=list(COMMON_FILTERS.keys()),
-        default=1,  # Default to the most common filter (HTTP)
-        help="""Choose a predefined filter by its number:
-        %s"""
-        % "\n".join([f"  {key}: {value[1]}" for key, value in COMMON_FILTERS.items()]),
-    )
-    parser.add_argument(
         "-o",
         "--output",
         help="Optional output file path (e.g., output.csv, output.json). "
@@ -207,12 +230,9 @@ def main():
     )
     args = parser.parse_args()
 
-    # Get the filter expression from the chosen filter
-    filter_expression = COMMON_FILTERS[args.filter][0]
-
     # Start the capture in a separate thread
     capture_thread = threading.Thread(
-        target=capture_traffic, args=(args.interface, filter_expression, args.count)
+        target=capture_traffic, args=(args.interface, args.count)
     )
     capture_thread.daemon = True
     capture_thread.start()
