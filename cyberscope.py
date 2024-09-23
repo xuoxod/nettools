@@ -10,8 +10,8 @@ import socket
 import ipaddress
 import requests  # Import requests for making HTTP requests
 
-# Global dictionary to store captured packets, grouped by IP
-captured_packets = {}
+# Global dictionary to store captured packets
+captured_packets = []
 print_lock = threading.Lock()
 
 
@@ -32,14 +32,14 @@ def get_external_ip_info(ip_address):
     """Gets detailed information for external IP addresses using IP-API."""
     try:
         response = requests.get(f"http://ip-api.com/json/{ip_address}")
-        response.raise_for_status()  # Raise an exception for bad status codes
+        response.raise_for_status()
         data = response.json()
 
         if data["status"] == "success":
             city = data.get("city", "N/A")
             country = data.get("country", "N/A")
             isp = data.get("isp", "N/A")
-            org = data.get("org", "N/A")  # Get organization info
+            org = data.get("org", "N/A")
             return f"{TextColors.OKCYAN}City: {city}, Country: {country}, ISP: {isp}, Organization: {org}{TextColors.ENDC}"
         else:
             return "External IP: No additional information found."
@@ -49,9 +49,9 @@ def get_external_ip_info(ip_address):
 
 
 def format_packet_data(packet):
-    """Formats the packet data for display, handling potential errors."""
+    """Formats the packet data for display."""
     output = []
-    output.append("-" * 80)  # Separator line
+    output.append("-" * 80)
 
     try:
         output.append(
@@ -60,7 +60,6 @@ def format_packet_data(packet):
     except Exception as e:
         output.append(f"Error getting timestamp: {e}")
 
-    # Check if the IP layer is present before accessing its attributes
     if IP in packet:
         src_ip = packet[IP].src
         dst_ip = packet[IP].dst
@@ -70,7 +69,6 @@ def format_packet_data(packet):
             f"{TextColors.OKGREEN}Protocol:{TextColors.ENDC} {packet.sprintf('%IP.proto%')}"
         )
 
-        # Get external IP info if not in local network
         if not is_local_ip(src_ip):
             output.append(get_external_ip_info(src_ip))
 
@@ -80,7 +78,6 @@ def format_packet_data(packet):
     else:
         output.append("IP Layer not found in packet.")
 
-    # Add port information if TCP or UDP
     if TCP in packet:
         output.append(f"Source Port: {packet[TCP].sport}")
         output.append(f"Destination Port: {packet[TCP].dport}")
@@ -88,12 +85,10 @@ def format_packet_data(packet):
         output.append(f"Source Port: {packet[UDP].sport}")
         output.append(f"Destination Port: {packet[UDP].dport}")
 
-    # Add ICMP type and code if ICMP
     if ICMP in packet:
         output.append(f"ICMP Type: {packet[ICMP].type}")
         output.append(f"ICMP Code: {packet[ICMP].code}")
 
-    # Add payload information if available
     if Raw in packet:
         try:
             payload = packet[Raw].load.decode("utf-8", errors="replace")
@@ -118,13 +113,7 @@ def process_packet(packet):
     global captured_packets
     with print_lock:
         print(format_packet_data(packet))
-
-    # Store packet data for analysis (example: group by IP)
-    if IP in packet:
-        ip_key = packet[IP].src
-        if ip_key not in captured_packets:
-            captured_packets[ip_key] = []
-        captured_packets[ip_key].append(packet)
+    captured_packets.append(packet)
 
 
 def packet_sniffer(interface, filter_exp):
@@ -140,16 +129,30 @@ def analyze_traffic(output_format="console"):
     global captured_packets
 
     if output_format == "console":
-        # Example: Print the number of packets per IP
         print("\n----- Traffic Analysis -----")
-        for ip, packets in captured_packets.items():
-            print(f"IP: {ip}, Packets: {len(packets)}")
+        # Example: Print the number of packets per protocol
+        protocol_counts = {}
+        for packet in captured_packets:
+            if IP in packet:
+                protocol = packet.sprintf("%IP.proto%")
+                if protocol in protocol_counts:
+                    protocol_counts[protocol] += 1
+                else:
+                    protocol_counts[protocol] = 1
+        for protocol, count in protocol_counts.items():
+            print(f"Protocol: {protocol}, Packets: {count}")
 
     elif output_format == "json":
         # Example: Create a JSON structure for analysis
-        analysis_data = {}
-        for ip, packets in captured_packets.items():
-            analysis_data[ip] = {"packet_count": len(packets)}
+        analysis_data = {"packets": []}
+        for packet in captured_packets:
+            packet_info = {}
+            if IP in packet:
+                packet_info["src_ip"] = packet[IP].src
+                packet_info["dst_ip"] = packet[IP].dst
+                packet_info["protocol"] = packet.sprintf("%IP.proto%")
+            analysis_data["packets"].append(packet_info)
+
         with open("traffic_analysis.json", "w") as f:
             json.dump(analysis_data, f, indent=4)
         print("Traffic analysis saved to traffic_analysis.json")
@@ -158,9 +161,12 @@ def analyze_traffic(output_format="console"):
         # Example: Create a CSV file for analysis
         with open("traffic_analysis.csv", "w", newline="") as csvfile:
             writer = csv.writer(csvfile)
-            writer.writerow(["IP Address", "Packet Count"])
-            for ip, packets in captured_packets.items():
-                writer.writerow([ip, len(packets)])
+            writer.writerow(["Source IP", "Destination IP", "Protocol"])
+            for packet in captured_packets:
+                if IP in packet:
+                    writer.writerow(
+                        [packet[IP].src, packet[IP].dst, packet.sprintf("%IP.proto%")]
+                    )
         print("Traffic analysis saved to traffic_analysis.csv")
 
 
@@ -177,8 +183,9 @@ def main():
     parser.add_argument(
         "-i",
         "--interface",
-        help="Network interface to sniff on (e.g., eth0, wlan0)",
-        required=True,
+        help="Network interface to sniff on (e.g., eth0, wlan0). "
+        "Omit this argument to capture on all interfaces.",
+        required=False,  # Make the interface argument optional
     )
     parser.add_argument(
         "-f",
@@ -197,21 +204,29 @@ def main():
     # Get available interfaces
     available_interfaces = get_network_interfaces()
 
-    # Check if the specified interface exists
-    if args.interface not in available_interfaces:
-        print(
-            f"{TextColors.FAIL}[-]{TextColors.ENDC} Interface '{args.interface}' not found. Available interfaces: {', '.join(available_interfaces)}"
+    # Capture on all interfaces if none is specified
+    if not args.interface:
+        interfaces_to_sniff = available_interfaces
+    else:
+        # Check if the specified interface exists
+        if args.interface not in available_interfaces:
+            print(
+                f"{TextColors.FAIL}[-]{TextColors.ENDC} Interface '{args.interface}' not found. Available interfaces: {', '.join(available_interfaces)}"
+            )
+            exit(1)
+        interfaces_to_sniff = [args.interface]
+
+    # Start a sniffer thread for each interface
+    sniffer_threads = []
+    for interface in interfaces_to_sniff:
+        sniffer_thread = threading.Thread(
+            target=packet_sniffer, args=(interface, args.filter)
         )
-        exit(1)
+        sniffer_thread.daemon = True
+        sniffer_thread.start()
+        sniffer_threads.append(sniffer_thread)
 
-    # Start the packet sniffer in a separate thread
-    sniffer_thread = threading.Thread(
-        target=packet_sniffer, args=(args.interface, args.filter)
-    )
-    sniffer_thread.daemon = True  # Allow main thread to exit even if sniffer is running
-    sniffer_thread.start()
-
-    # Keep the main thread running to allow analysis
+    # Keep the main thread running
     try:
         while True:
             time.sleep(1)
