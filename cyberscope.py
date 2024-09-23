@@ -4,7 +4,8 @@ import time
 import threading
 import json
 import csv
-from scapy.all import sniff, IP, TCP, UDP, ICMP
+from datetime import datetime
+from scapy.all import sniff, IP, TCP, UDP, ICMP, Raw
 
 # Define common filter expressions with descriptions
 COMMON_FILTERS = {
@@ -23,6 +24,36 @@ captured_packets = {}
 print_lock = threading.Lock()
 
 
+def format_packet_data(packet):
+    """Formats the packet data for display."""
+    output = []
+    output.append("-" * 40)  # Separator line
+    output.append(f"Timestamp: {datetime.fromtimestamp(packet.time)}")
+    output.append(f"Source IP: {packet[IP].src}")
+    output.append(f"Destination IP: {packet[IP].dst}")
+    output.append(f"Protocol: {packet.sprintf('%IP.proto%')}")
+
+    # Add port information if TCP or UDP
+    if TCP in packet:
+        output.append(f"Source Port: {packet[TCP].sport}")
+        output.append(f"Destination Port: {packet[TCP].dport}")
+    elif UDP in packet:
+        output.append(f"Source Port: {packet[UDP].sport}")
+        output.append(f"Destination Port: {packet[UDP].dport}")
+
+    # Add ICMP type and code if ICMP
+    if ICMP in packet:
+        output.append(f"ICMP Type: {packet[ICMP].type}")
+        output.append(f"ICMP Code: {packet[ICMP].code}")
+
+    # Add payload information if available
+    if Raw in packet:
+        payload = packet[Raw].load.decode("utf-8", errors="replace")
+        output.append(f"Payload:\n{payload}")
+
+    return "\n".join(output)
+
+
 def packet_callback(packet):
     """Callback function to process captured packets."""
     with print_lock:
@@ -30,18 +61,15 @@ def packet_callback(packet):
         src_ip = packet[IP].src if IP in packet else "Unknown"
         dst_ip = packet[IP].dst if IP in packet else "Unknown"
         protocol = packet.sprintf("%IP.proto%")
-        summary = packet.summary()
 
         # Group packets by source IP
         if src_ip not in captured_packets:
             captured_packets[src_ip] = []
-        captured_packets[src_ip].append(
-            {"dst_ip": dst_ip, "protocol": protocol, "summary": summary}
-        )
+        captured_packets[src_ip].append(packet)
 
-        # Print the packet information to the console
-        print(f"Source IP: {src_ip} -> Destination IP: {dst_ip} ({protocol})")
-        print(f"Summary: {summary}\n")
+        # Print the formatted packet information to the console
+        print(format_packet_data(packet))
+        print("-" * 40)  # Separator line
 
 
 def capture_traffic(interface, filter_expression, count=0):
@@ -58,25 +86,64 @@ def capture_traffic(interface, filter_expression, count=0):
 def save_to_csv(filename):
     """Saves the captured packets to a CSV file."""
     with open(filename, "w", newline="") as csvfile:
-        fieldnames = ["src_ip", "dst_ip", "protocol", "summary"]
+        fieldnames = [
+            "timestamp",
+            "src_ip",
+            "dst_ip",
+            "protocol",
+            "src_port",
+            "dst_port",
+            "icmp_type",
+            "icmp_code",
+            "payload",
+        ]
         writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
         writer.writeheader()
         for src_ip, packets in captured_packets.items():
             for packet in packets:
-                writer.writerow(
-                    {
-                        "src_ip": src_ip,
-                        "dst_ip": packet["dst_ip"],
-                        "protocol": packet["protocol"],
-                        "summary": packet["summary"],
-                    }
-                )
+                data = {
+                    "timestamp": datetime.fromtimestamp(packet.time),
+                    "src_ip": packet[IP].src if IP in packet else "Unknown",
+                    "dst_ip": packet[IP].dst if IP in packet else "Unknown",
+                    "protocol": packet.sprintf("%IP.proto%"),
+                    "src_port": packet[TCP].sport if TCP in packet else "N/A",
+                    "dst_port": packet[TCP].dport if TCP in packet else "N/A",
+                    "icmp_type": packet[ICMP].type if ICMP in packet else "N/A",
+                    "icmp_code": packet[ICMP].code if ICMP in packet else "N/A",
+                    "payload": (
+                        packet[Raw].load.decode("utf-8", errors="replace")
+                        if Raw in packet
+                        else "N/A"
+                    ),
+                }
+                writer.writerow(data)
 
 
 def save_to_json(filename):
     """Saves the captured packets to a JSON file."""
+    output_data = {}
+    for src_ip, packets in captured_packets.items():
+        output_data[src_ip] = []
+        for packet in packets:
+            data = {
+                "timestamp": datetime.fromtimestamp(packet.time).isoformat(),
+                "src_ip": packet[IP].src if IP in packet else "Unknown",
+                "dst_ip": packet[IP].dst if IP in packet else "Unknown",
+                "protocol": packet.sprintf("%IP.proto%"),
+                "src_port": packet[TCP].sport if TCP in packet else "N/A",
+                "dst_port": packet[TCP].dport if TCP in packet else "N/A",
+                "icmp_type": packet[ICMP].type if ICMP in packet else "N/A",
+                "icmp_code": packet[ICMP].code if ICMP in packet else "N/A",
+                "payload": (
+                    packet[Raw].load.decode("utf-8", errors="replace")
+                    if Raw in packet
+                    else "N/A"
+                ),
+            }
+            output_data[src_ip].append(data)
+
     with open(filename, "w") as jsonfile:
-        json.dump(captured_packets, jsonfile, indent=4)
+        json.dump(output_data, jsonfile, indent=4)
 
 
 def main():
