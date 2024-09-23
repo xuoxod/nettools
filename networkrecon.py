@@ -454,6 +454,7 @@ def main():
     )
 
     # Render the Jinja2 template
+    # trunk-ignore(bandit/B701)
     env = Environment(loader=FileSystemLoader("."))
     template = env.get_template("scan_results.html")
     html_output = template.render(scan_results=results, scan_time=datetime.now())

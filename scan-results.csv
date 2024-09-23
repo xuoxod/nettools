@@ -1,4 +1,2 @@
 IP,MAC Address,Port,Service
-192.168.1.1,78:67:0e:ba:7e:74,80,http
-192.168.1.1,78:67:0e:ba:7e:74,8080,http-alt
-192.168.1.1,78:67:0e:ba:7e:74,443,https
+192.168.1.158,04:ea:56:9d:4f:cc,30778,Unknown
