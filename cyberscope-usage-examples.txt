@@ -1,0 +1,11 @@
+Capture all traffic on interface wlan0:
+
+python3 cyberscope.py -i wlan0 
+
+Capture only HTTP traffic (port 80) on interface eth0:
+
+python3 cyberscope.py -i eth0 -f "tcp port 80"
+
+Capture ICMP traffic (ping) on interface eth0 and analyze it, displaying results in the console:
+
+python3 cyberscope.py -i eth0 -f "icmp" -a console
