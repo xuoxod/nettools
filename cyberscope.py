@@ -7,19 +7,8 @@ import csv
 from datetime import datetime
 from scapy.all import sniff, IP, TCP, UDP, ICMP, Raw, Packet
 import socket
-import ipaddress  # Add this import
-
-# Attempt to import geoip2, but handle the case where it's not available
-try:
-    import geoip2.database
-
-    geoip2_available = True
-    reader = geoip2.database.Reader("GeoLite2-City.mmdb")  # Update path if needed
-except ImportError:
-    geoip2_available = False
-    print(
-        "Warning: geoip2 library not found. To enable detailed IP geolocation, install it with 'pip install geoip2' and download the GeoLite2 database."
-    )
+import ipaddress
+import requests  # Import requests for making HTTP requests
 
 # Global dictionary to store captured packets, grouped by IP
 captured_packets = {}
@@ -40,22 +29,23 @@ class TextColors:
 
 
 def get_external_ip_info(ip_address):
-    """Gets detailed information for external IP addresses."""
-    if geoip2_available:  # Check if geoip2 is installed
-        try:
-            response = reader.city(ip_address)
-            city = response.city.name or "N/A"
-            country = response.country.name or "N/A"
-            isp = response.traits.get("isp") or "N/A"
-            domain = socket.gethostbyaddr(ip_address)[0]  # Reverse DNS lookup
-            return f"{TextColors.OKCYAN}City: {city}, Country: {country}, ISP: {isp}, Domain: {domain}{TextColors.ENDC}"
-        except (
-            geoip2.errors.AddressNotFoundError,
-            socket.herror,
-        ):
+    """Gets detailed information for external IP addresses using IP-API."""
+    try:
+        response = requests.get(f"http://ip-api.com/json/{ip_address}")
+        response.raise_for_status()  # Raise an exception for bad status codes
+        data = response.json()
+
+        if data["status"] == "success":
+            city = data.get("city", "N/A")
+            country = data.get("country", "N/A")
+            isp = data.get("isp", "N/A")
+            org = data.get("org", "N/A")  # Get organization info
+            return f"{TextColors.OKCYAN}City: {city}, Country: {country}, ISP: {isp}, Organization: {org}{TextColors.ENDC}"
+        else:
             return "External IP: No additional information found."
-    else:
-        return "geoip2 library not installed. Cannot provide additional IP details."
+
+    except requests.exceptions.RequestException as e:
+        return f"Error fetching IP details: {e}"
 
 
 def format_packet_data(packet):
@@ -114,218 +104,123 @@ def format_packet_data(packet):
     return "\n".join(output)
 
 
-def packet_callback(packet):
-    """Callback function to process captured packets, handling potential errors."""
-    with print_lock:
-        try:
-            # Extract relevant information from the packet
-            src_ip = packet[IP].src if IP in packet else "Unknown"
-            dst_ip = packet[IP].dst if IP in packet else "Unknown"
-            protocol = packet.sprintf("%IP.proto%")
-
-            # Group packets by source IP
-            if src_ip not in captured_packets:
-                captured_packets[src_ip] = []
-            captured_packets[src_ip].append(packet)
-
-            # Print the formatted packet information to the console
-            print(format_packet_data(packet))
-            print("-" * 80)  # Separator line
-
-        except Exception as e:
-            print(f"Error processing packet: {e}")
-
-
-def capture_traffic(interface, count=0):
-    """Captures network traffic on the specified interface, handling potential errors."""
-    try:
-        sniff(
-            iface=interface,
-            prn=packet_callback,
-            count=count,
-            store=False,
-        )
-    except PermissionError:
-        print(
-            "Error: Insufficient permissions to capture on interface. Try running with sudo."
-        )
-    except Exception as e:
-        print(f"Error capturing traffic: {e}")
-
-
-def save_to_csv(filename):
-    """Saves the captured packets to a CSV file, handling potential errors."""
-    try:
-        with open(filename, "w", newline="") as csvfile:
-            fieldnames = [
-                "timestamp",
-                "src_ip",
-                "dst_ip",
-                "protocol",
-                "src_port",
-                "dst_port",
-                "icmp_type",
-                "icmp_code",
-                "payload",
-            ]
-            writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
-            writer.writeheader()
-            for src_ip, packets in captured_packets.items():
-                for packet in packets:
-                    # Use a try-except block to handle potential errors when accessing packet layers
-                    try:
-                        data = {
-                            "timestamp": datetime.fromtimestamp(packet.time),
-                            "src_ip": packet[IP].src if IP in packet else "Unknown",
-                            "dst_ip": packet[IP].dst if IP in packet else "Unknown",
-                            "protocol": packet.sprintf("%IP.proto%"),
-                            "src_port": packet[TCP].sport if TCP in packet else "N/A",
-                            "dst_port": packet[TCP].dport if TCP in packet else "N/A",
-                            "icmp_type": packet[ICMP].type if ICMP in packet else "N/A",
-                            "icmp_code": packet[ICMP].code if ICMP in packet else "N/A",
-                            "payload": (
-                                packet[Raw].load.decode("utf-8", errors="replace")
-                                if Raw in packet
-                                else "N/A"
-                            ),
-                        }
-                        writer.writerow(data)
-                    except Exception as e:
-                        print(f"Error writing packet data to CSV: {e}")
-    except OSError as e:
-        print(f"Error saving to CSV file: {e}")
-
-
-def save_to_json(filename):
-    """Saves the captured packets to a JSON file, handling potential errors."""
-    output_data = {}
-    for src_ip, packets in captured_packets.items():
-        output_data[src_ip] = []
-        for packet in packets:
-            # Use a try-except block to handle potential errors when accessing packet layers
-            try:
-                data = {
-                    "timestamp": datetime.fromtimestamp(packet.time).isoformat(),
-                    "src_ip": packet[IP].src if IP in packet else "Unknown",
-                    "dst_ip": packet[IP].dst if IP in packet else "Unknown",
-                    "protocol": packet.sprintf("%IP.proto%"),
-                    "src_port": packet[TCP].sport if TCP in packet else "N/A",
-                    "dst_port": packet[TCP].dport if TCP in packet else "N/A",
-                    "icmp_type": packet[ICMP].type if ICMP in packet else "N/A",
-                    "icmp_code": packet[ICMP].code if ICMP in packet else "N/A",
-                    "payload": (
-                        packet[Raw].load.decode("utf-8", errors="replace")
-                        if Raw in packet
-                        else "N/A"
-                    ),
-                }
-                output_data[src_ip].append(data)
-            except Exception as e:
-                print(f"Error writing packet data to JSON: {e}")
-
-    try:
-        with open(filename, "w") as jsonfile:
-            json.dump(output_data, jsonfile, indent=4)
-    except OSError as e:
-        print(f"Error saving to JSON file: {e}")
-
-
 def is_local_ip(ip_address):
     """Checks if an IP address is within the local network."""
-    for interface in netifaces.interfaces():
-        for link in netifaces.ifaddresses(interface).get(netifaces.AF_INET, []):
-            subnet = ipaddress.ip_network(
-                f"{link['addr']}/{link['netmask']}", strict=False
-            )
-            if ipaddress.ip_address(ip_address) in subnet:
-                return True
-    return False
+    try:
+        ip = ipaddress.ip_address(ip_address)
+        return ip.is_private
+    except ValueError:
+        return False
+
+
+def process_packet(packet):
+    """Processes each captured packet."""
+    global captured_packets
+    with print_lock:
+        print(format_packet_data(packet))
+
+    # Store packet data for analysis (example: group by IP)
+    if IP in packet:
+        ip_key = packet[IP].src
+        if ip_key not in captured_packets:
+            captured_packets[ip_key] = []
+        captured_packets[ip_key].append(packet)
+
+
+def packet_sniffer(interface, filter_exp):
+    """Starts sniffing packets on the specified interface."""
+    print(
+        f"{TextColors.OKGREEN}[*]{TextColors.ENDC} Starting packet capture on interface: {interface}"
+    )
+    sniff(iface=interface, filter=filter_exp, prn=process_packet, store=False)
+
+
+def analyze_traffic(output_format="console"):
+    """Analyzes the captured traffic and provides insights."""
+    global captured_packets
+
+    if output_format == "console":
+        # Example: Print the number of packets per IP
+        print("\n----- Traffic Analysis -----")
+        for ip, packets in captured_packets.items():
+            print(f"IP: {ip}, Packets: {len(packets)}")
+
+    elif output_format == "json":
+        # Example: Create a JSON structure for analysis
+        analysis_data = {}
+        for ip, packets in captured_packets.items():
+            analysis_data[ip] = {"packet_count": len(packets)}
+        with open("traffic_analysis.json", "w") as f:
+            json.dump(analysis_data, f, indent=4)
+        print("Traffic analysis saved to traffic_analysis.json")
+
+    elif output_format == "csv":
+        # Example: Create a CSV file for analysis
+        with open("traffic_analysis.csv", "w", newline="") as csvfile:
+            writer = csv.writer(csvfile)
+            writer.writerow(["IP Address", "Packet Count"])
+            for ip, packets in captured_packets.items():
+                writer.writerow([ip, len(packets)])
+        print("Traffic analysis saved to traffic_analysis.csv")
+
+
+def get_network_interfaces():
+    """Returns a list of available network interfaces."""
+    return netifaces.interfaces()
 
 
 def main():
-    """Main function to handle arguments and start the capture."""
+    """Main function to handle arguments and start the program."""
     parser = argparse.ArgumentParser(
-        description="""Capture and analyze network traffic on a specific interface.
-
-        This script allows you to capture and view network packets in detail. 
-        You can specify the network interface, the number of packets to capture, 
-        and apply filters to focus on specific traffic.
-
-        Examples:
-        - Capture 100 packets on interface eth0:
-            python cyberscope.py -i eth0 -c 100
-        - Capture packets continuously on interface wlan0 and save to a CSV file:
-            python cyberscope.py -i wlan0 -o output.csv -t csv
-        - Capture packets continuously on the default interface and save to a JSON file:
-            python cyberscope.py -o output.json -t json
-        """,
-        formatter_class=argparse.RawTextHelpFormatter,  # Preserve formatting
+        description="CyberScope - A Network Packet Analyzer and Forensics Tool"
     )
-
-    # Get default interface
-    default_interface = (
-        netifaces.gateways()["default"][netifaces.AF_INET][1]
-        if netifaces.gateways()
-        else "No default gateway found"
-    )
-
-    # Get available interfaces
-    interfaces = netifaces.interfaces()
-
     parser.add_argument(
         "-i",
         "--interface",
-        help="""Network interface to capture on (e.g., eth0, wlan0).
-        Defaults to the system's default interface for communication (%(default)s) if not provided."""
-        % {"default": default_interface},
-        choices=interfaces,
-        default=default_interface,
+        help="Network interface to sniff on (e.g., eth0, wlan0)",
+        required=True,
     )
     parser.add_argument(
-        "-c",
-        "--count",
-        type=int,
-        default=0,
-        help="Number of packets to capture (0 for continuous capture). Defaults to 0.",
+        "-f",
+        "--filter",
+        help="BPF filter expression (e.g., 'tcp port 80')",
+        default=None,
     )
     parser.add_argument(
-        "-o",
-        "--output",
-        help="Optional output file path (e.g., output.csv, output.json). "
-        "If not provided, output will be printed to the console only.",
-    )
-    parser.add_argument(
-        "-t",
-        "--type",
-        choices=["csv", "json"],
-        help="Output file type (csv or json). Required if -o is specified.",
+        "-a",
+        "--analyze",
+        help="Analyze captured traffic (options: console, json, csv)",
+        default=None,
     )
     args = parser.parse_args()
 
-    # Start the capture in a separate thread
-    capture_thread = threading.Thread(
-        target=capture_traffic, args=(args.interface, args.count)
-    )
-    capture_thread.daemon = True
-    capture_thread.start()
+    # Get available interfaces
+    available_interfaces = get_network_interfaces()
 
+    # Check if the specified interface exists
+    if args.interface not in available_interfaces:
+        print(
+            f"{TextColors.FAIL}[-]{TextColors.ENDC} Interface '{args.interface}' not found. Available interfaces: {', '.join(available_interfaces)}"
+        )
+        exit(1)
+
+    # Start the packet sniffer in a separate thread
+    sniffer_thread = threading.Thread(
+        target=packet_sniffer, args=(args.interface, args.filter)
+    )
+    sniffer_thread.daemon = True  # Allow main thread to exit even if sniffer is running
+    sniffer_thread.start()
+
+    # Keep the main thread running to allow analysis
     try:
         while True:
-            # Keep the main thread alive to allow capturing
             time.sleep(1)
     except KeyboardInterrupt:
-        print("\nCapture stopped.")
+        print(f"\n{TextColors.WARNING}[*]{TextColors.ENDC} Exiting...")
 
-    # Save the output to a file if requested
-    if args.output:
-        if args.type == "csv":
-            save_to_csv(args.output)
-            print(f"Output saved to {args.output} (CSV)")
-        elif args.type == "json":
-            save_to_json(args.output)
-            print(f"Output saved to {args.output} (JSON)")
-        else:
-            print("Error: Please specify the output type (-t csv or -t json).")
+    # Perform traffic analysis if requested
+    if args.analyze:
+        analyze_traffic(args.analyze)
 
 
 if __name__ == "__main__":
