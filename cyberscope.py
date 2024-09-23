@@ -6,27 +6,87 @@ import json
 import csv
 from datetime import datetime
 from scapy.all import sniff, IP, TCP, UDP, ICMP, Raw, Packet
+import socket
+import ipaddress  # Add this import
+
+# Attempt to import geoip2, but handle the case where it's not available
+try:
+    import geoip2.database
+
+    geoip2_available = True
+    reader = geoip2.database.Reader("GeoLite2-City.mmdb")  # Update path if needed
+except ImportError:
+    geoip2_available = False
+    print(
+        "Warning: geoip2 library not found. To enable detailed IP geolocation, install it with 'pip install geoip2' and download the GeoLite2 database."
+    )
 
 # Global dictionary to store captured packets, grouped by IP
 captured_packets = {}
 print_lock = threading.Lock()
 
 
+# ANSI escape codes for text coloring
+class TextColors:
+    HEADER = "\033[95m"
+    OKBLUE = "\033[94m"
+    OKCYAN = "\033[96m"
+    OKGREEN = "\033[92m"
+    WARNING = "\033[93m"
+    FAIL = "\033[91m"
+    ENDC = "\033[0m"
+    BOLD = "\033[1m"
+    UNDERLINE = "\033[4m"
+
+
+def get_external_ip_info(ip_address):
+    """Gets detailed information for external IP addresses."""
+    if geoip2_available:  # Check if geoip2 is installed
+        try:
+            response = reader.city(ip_address)
+            city = response.city.name or "N/A"
+            country = response.country.name or "N/A"
+            isp = response.traits.get("isp") or "N/A"
+            domain = socket.gethostbyaddr(ip_address)[0]  # Reverse DNS lookup
+            return f"{TextColors.OKCYAN}City: {city}, Country: {country}, ISP: {isp}, Domain: {domain}{TextColors.ENDC}"
+        except (
+            geoip2.errors.AddressNotFoundError,
+            socket.herror,
+        ):
+            return "External IP: No additional information found."
+    else:
+        return "geoip2 library not installed. Cannot provide additional IP details."
+
+
 def format_packet_data(packet):
     """Formats the packet data for display, handling potential errors."""
     output = []
-    output.append("-" * 40)  # Separator line
+    output.append("-" * 80)  # Separator line
 
     try:
-        output.append(f"Timestamp: {datetime.fromtimestamp(packet.time)}")
+        output.append(
+            f"{TextColors.HEADER}{TextColors.BOLD}Timestamp:{TextColors.ENDC} {datetime.fromtimestamp(packet.time)}"
+        )
     except Exception as e:
         output.append(f"Error getting timestamp: {e}")
 
     # Check if the IP layer is present before accessing its attributes
     if IP in packet:
-        output.append(f"Source IP: {packet[IP].src}")
-        output.append(f"Destination IP: {packet[IP].dst}")
-        output.append(f"Protocol: {packet.sprintf('%IP.proto%')}")
+        src_ip = packet[IP].src
+        dst_ip = packet[IP].dst
+        output.append(f"{TextColors.OKBLUE}Source IP:{TextColors.ENDC} {src_ip}")
+        output.append(f"{TextColors.OKBLUE}Destination IP:{TextColors.ENDC} {dst_ip}")
+        output.append(
+            f"{TextColors.OKGREEN}Protocol:{TextColors.ENDC} {packet.sprintf('%IP.proto%')}"
+        )
+
+        # Get external IP info if not in local network
+        if not is_local_ip(src_ip):
+            output.append(get_external_ip_info(src_ip))
+
+        if not is_local_ip(dst_ip):
+            output.append(get_external_ip_info(dst_ip))
+
     else:
         output.append("IP Layer not found in packet.")
 
@@ -70,7 +130,7 @@ def packet_callback(packet):
 
             # Print the formatted packet information to the console
             print(format_packet_data(packet))
-            print("-" * 40)  # Separator line
+            print("-" * 80)  # Separator line
 
         except Exception as e:
             print(f"Error processing packet: {e}")
@@ -168,6 +228,18 @@ def save_to_json(filename):
             json.dump(output_data, jsonfile, indent=4)
     except OSError as e:
         print(f"Error saving to JSON file: {e}")
+
+
+def is_local_ip(ip_address):
+    """Checks if an IP address is within the local network."""
+    for interface in netifaces.interfaces():
+        for link in netifaces.ifaddresses(interface).get(netifaces.AF_INET, []):
+            subnet = ipaddress.ip_network(
+                f"{link['addr']}/{link['netmask']}", strict=False
+            )
+            if ipaddress.ip_address(ip_address) in subnet:
+                return True
+    return False
 
 
 def main():
