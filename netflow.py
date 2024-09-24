@@ -153,6 +153,7 @@ if __name__ == "__main__":
             f"from/to IP: {args.target_ip}"
         )
 
+        # trunk-ignore(ruff/F405)
         sniff(iface=args.interface, prn=packet_callback, store=0)
 
     except KeyboardInterrupt:
