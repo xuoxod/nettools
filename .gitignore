@@ -175,3 +175,5 @@ env/
 *.html
 *.json
 *.csv
+*.hex
+*.txt
