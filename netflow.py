@@ -1,6 +1,4 @@
-# trunk-ignore-all(isort)
 #!/usr/bin/env python3
-# trunk-ignore(ruff/F403)
 from scapy.all import *
 
 import sys
@@ -58,7 +56,7 @@ def format_packet_data(packet):
         output.append(f"ICMP Type: {packet[ICMP].type}")
         output.append(f"ICMP Code: {packet[ICMP].code}")
 
-    # Limit payload display
+    # Limit payload display for console output
     if Raw in packet:
         try:
             payload = packet[Raw].load.decode("utf-8", errors="replace")
@@ -72,19 +70,21 @@ def format_packet_data(packet):
 
 
 def packet_callback(packet):
-    global original_forwarding
+    global original_forwarding, args
 
     if IP in packet and (
-        # trunk-ignore(ruff/F405)
-        packet[IP].src == args.target_ip
-        or packet[IP].dst == args.target_ip  # type: ignore
+        packet[IP].src == args.target_ip or packet[IP].dst == args.target_ip
     ):
         try:
             print(format_packet_data(packet))
 
             # Forward the packet
-            # trunk-ignore(ruff/F405)
             send(packet, verbose=0)
+
+            # Save the full packet to the PCAP file if specified
+            if args.output_file:
+                wrpcap(args.output_file, packet, append=True)
+
         except Exception as e:
             print(f"{TextColors.FAIL}Error processing packet: {e}{TextColors.ENDC}")
 
@@ -138,6 +138,11 @@ if __name__ == "__main__":
         help=f"The network interface to sniff on (e.g., eth0, wlan0). Default: {default_interface}",
         default=default_interface,  # Set default interface here
     )
+    parser.add_argument(
+        "-o",
+        "--output_file",
+        help="Optional PCAP file to save captured packets (e.g., captured.pcap)",
+    )
     args = parser.parse_args()
 
     try:
@@ -148,7 +153,6 @@ if __name__ == "__main__":
             f"from/to IP: {args.target_ip}"
         )
 
-        # trunk-ignore(ruff/F405)
         sniff(iface=args.interface, prn=packet_callback, store=0)
 
     except KeyboardInterrupt:
