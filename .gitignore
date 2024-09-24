@@ -172,3 +172,6 @@ env/
 .env.production
 
 *.pcap
+*.html
+*.json
+*.csv
