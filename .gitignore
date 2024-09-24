@@ -170,3 +170,5 @@ env/
 .env
 .env.test
 .env.production
+
+*.pcap
