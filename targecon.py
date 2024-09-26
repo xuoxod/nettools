@@ -50,7 +50,7 @@ def get_mac_address(ip_address):
         return None
 
 
-def save_output(data, output_format="csv", filename="output.csv"):
+def save_output(data, output_format="html", filename="output.html"):
     """Saves the output data to a file in the specified format."""
     try:
         if output_format.lower() == "csv":
@@ -60,6 +60,38 @@ def save_output(data, output_format="csv", filename="output.csv"):
                 if csvfile.tell() == 0:
                     writer.writeheader()
                 writer.writerows(data)
+        elif output_format.lower() == "html":
+            with open(filename, "w") as htmlfile:
+                htmlfile.write("<html><body><table>\n")
+                htmlfile.write("<tr>")  # Start header row
+
+                # Define colors for each column (you can customize these)
+                column_colors = [
+                    "#ADD8E6",  # Light Blue
+                    "#90EE90",  # Light Green
+                    "#FFFFE0",  # Light Yellow
+                    "#FFC0CB",  # Pink
+                    "#D3D3D3",  # Light Gray
+                    "#FFA07A",  # Light Salmon
+                    "#FAFAD2",  # Light Goldenrod Yellow
+                    "#E0FFFF",  # Light Cyan
+                    "#FFDAB9",  # Peach Puff
+                ]
+
+                for col_index, fieldname in enumerate(data[0].keys()):
+                    htmlfile.write(
+                        f'<th style="background-color: {column_colors[col_index % len(column_colors)]};">{fieldname}</th>'
+                    )
+                htmlfile.write("</tr>\n")  # End header row
+
+                for row in data:
+                    htmlfile.write("<tr>")
+                    for col_index, value in enumerate(row.values()):
+                        htmlfile.write(
+                            f'<td style="background-color: {column_colors[col_index % len(column_colors)]};">{value}</td>'
+                        )
+                    htmlfile.write("</tr>\n")
+                htmlfile.write("</table></body></html>")
         elif output_format.lower() == "json":
             with open(filename, "r+") as jsonfile:
                 try:
@@ -206,6 +238,8 @@ def send_custom_packet(
                     output_file = "output.csv"
                 elif output_format.lower() == "json":
                     output_file = "output.json"
+                else:
+                    output_file = "output.html"
 
             save_output(output_data, output_format, output_file)
 
@@ -250,8 +284,8 @@ if __name__ == "__main__":
     parser.add_argument(
         "-of",
         "--output-format",
-        choices=["csv", "json"],
-        help="Output format for saving results (csv, json). If provided, output will be saved to a file.",
+        choices=["csv", "json", "html"],
+        help="Output format for saving results (csv, json, html). If provided, output will be saved to a file.",
     )
     parser.add_argument(
         "-o",
